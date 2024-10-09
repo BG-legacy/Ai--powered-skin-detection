@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Prediction Result</title>
+</head>
+<body>
+    <h1>Prediction Result</h1>
+    <p><strong>Label:</strong> {{ label }}</p>
+    <p><strong>Confidence:</strong> {{ confidence }}</p>
+    <p><strong>Description:</strong> {{ description }}</p>
+    
+    <!-- Button to go back to the upload page -->
+    <form action="/" method="GET">
+        <button type="submit">Upload Another Image</button>
+    </form>
+</body>
+</html>
