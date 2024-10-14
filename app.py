@@ -3,6 +3,8 @@ from Model import SkinCancerModel  # Import the SkinCancerModel class from Model
 from nlp_ollama import LangChainOllama  # Import the LangChainOllama class from nlp_ollama.py
 import os  # Import os for file and directory operations
 import requests  # Add this import
+import csv
+from datetime import datetime
 
 # Initialize the Flask application
 app = Flask(__name__)  # Create a Flask application instance
@@ -10,6 +12,17 @@ app = Flask(__name__)  # Create a Flask application instance
 # Initialize model and NLP components
 skin_cancer_model = SkinCancerModel()  # Create an instance of SkinCancerModel
 nlp_model = LangChainOllama()  # Create an instance of LangChainOllama
+
+# New function to save prediction to CSV
+def save_prediction_to_csv(image_path, predicted_label, confidence):
+    csv_file = 'predictions.csv'
+    file_exists = os.path.isfile(csv_file)
+    
+    with open(csv_file, 'a', newline='') as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(['Timestamp', 'Image', 'Prediction', 'Confidence'])
+        writer.writerow([datetime.now(), image_path, predicted_label, confidence])
 
 # Route for the home page with two options: Ask a question or upload an image
 @app.route('/')
@@ -44,6 +57,16 @@ def upload_and_predict():
     try:
         # Predict the result using the SkinCancerModel class
         predicted_label, confidence = skin_cancer_model.predict(image_path)  # Predict the label and confidence using the model
+
+        # Save prediction to CSV
+        save_prediction_to_csv(image_path, predicted_label, confidence)
+        
+        # Check if it's time to retrain (e.g., every 10 predictions)
+        with open('predictions.csv', 'r') as f:
+            num_predictions = sum(1 for line in f) - 1  # Subtract 1 for header
+        
+        if num_predictions % 10 == 0:
+            skin_cancer_model.retrain_with_new_data('predictions.csv')
 
         # Generate a detailed description using the LangChainOllama class
         description = nlp_model.generate_response("What does this mean?", predicted_label, confidence)  # Generate a detailed description using the NLP model
