@@ -7,6 +7,7 @@ from torch.utils.data import Dataset, DataLoader  # Import Dataset and DataLoade
 from sklearn.model_selection import train_test_split  # Import train_test_split for splitting data
 import pandas as pd  # Import pandas for data manipulation
 import os  # Import os for file and directory operations
+import csv  # Import csv for reading CSV files
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)  # Configure logging to show INFO level messages
@@ -179,3 +180,38 @@ class SkinCancerModel:
             batch_size=32,  # Batch size
             learning_rate=0.001  # Learning rate
         )  # Retrain the model
+
+    def retrain_with_new_data(self, csv_file):
+        # Create a reverse mapping of the label dictionary
+        reverse_label_dict = {v: k for k, v in self.label_dict.items()}
+
+        # Read new data from CSV
+        new_image_paths = []
+        new_labels = []
+        with open(csv_file, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                new_image_paths.append(row['Image'])
+                # Use the reverse mapping to get the label index
+                prediction = row['Prediction']
+                if prediction in reverse_label_dict:
+                    new_labels.append(reverse_label_dict[prediction])
+                else:
+                    logger.warning(f"Unknown prediction: {prediction}. Skipping this entry.")
+                    continue
+
+        # Combine new data with existing data
+        train_images, val_images, train_labels, val_labels = self.prepare_data('./metadata.csv', './HAM10000_images_part_1')
+        train_images += new_image_paths
+        train_labels += new_labels
+
+        # Retrain the model
+        self.train(
+            train_data={'image_paths': train_images, 'labels': train_labels},
+            val_data={'image_paths': val_images, 'labels': val_labels},
+            epochs=5,  # Reduced number of epochs for faster retraining
+            batch_size=32,
+            learning_rate=0.0001  # Reduced learning rate for fine-tuning
+        )
+
+        logger.info("Model retrained with new data.")
