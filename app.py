@@ -44,37 +44,33 @@ def ask_question():
 @app.route('/predict', methods=['POST'])
 def upload_and_predict():
     if 'file' not in request.files:
-        return 'No file uploaded', 400  # Return an error if no file is uploaded
+        return 'No file uploaded', 400
 
-    file = request.files['file']  # Get the uploaded file
+    file = request.files['file']
     if file.filename == '':
-        return 'No selected file', 400  # Return an error if no file is selected
+        return 'No selected file', 400
 
-    # Save the uploaded file to a folder
-    image_path = os.path.join('uploads', file.filename)  # Create the path to save the uploaded file
-    file.save(image_path)  # Save the file to the specified path
+    image_path = os.path.join('uploads', file.filename)
+    file.save(image_path)
 
     try:
-        # Predict the result using the SkinCancerModel class
-        predicted_label, confidence = skin_cancer_model.predict(image_path)  # Predict the label and confidence using the model
+        predicted_label, confidence = skin_cancer_model.predict(image_path)
 
-        # Save prediction to CSV
         save_prediction_to_csv(image_path, predicted_label, confidence)
         
-        # Check if it's time to retrain (e.g., every 10 predictions)
+        # Check if it's time to retrain (now every 5 predictions)
         with open('predictions.csv', 'r') as f:
             num_predictions = sum(1 for line in f) - 1  # Subtract 1 for header
         
-        if num_predictions % 10 == 0:
+        if num_predictions % 5 == 0:  # Changed from 10 to 5
             skin_cancer_model.retrain_with_new_data('predictions.csv')
 
-        # Generate a detailed description using the LangChainOllama class
-        description = nlp_model.generate_response("What does this mean?", predicted_label, confidence)  # Generate a detailed description using the NLP model
+        description = nlp_model.generate_response("What does this mean?", predicted_label, confidence)
 
         if description.startswith("Error:"):
-            return render_template('error.html', error=description), 503  # Render the error page with the error message
+            return render_template('error.html', error=description), 503
 
-        return render_template('result.html', label=predicted_label, confidence=f"{confidence * 100:.2f}%", description=description)  # Render the result page with the prediction and description
+        return render_template('result.html', label=predicted_label, confidence=f"{confidence * 100:.2f}%", description=description)
     except requests.exceptions.ConnectionError:
         error_message = "Unable to connect to the NLP server. Please ensure it's running and try again."
         return render_template('error.html', error=error_message), 503
