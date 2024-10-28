@@ -1,217 +1,233 @@
-import torch  # Import PyTorch library
-from torchvision import models, transforms  # Import models and transforms from torchvision
-import timm  # Import timm library for pre-trained models
-import logging  # Import logging library for logging information
-from PIL import Image  # Import Image class from PIL for image processing
-from torch.utils.data import Dataset, DataLoader  # Import Dataset and DataLoader for data handling
-from sklearn.model_selection import train_test_split  # Import train_test_split for splitting data
-import pandas as pd  # Import pandas for data manipulation
-import os  # Import os for file and directory operations
-import csv  # Import csv for reading CSV files
+import torch
+from torch import nn
+from torchvision import transforms
+import logging
+from PIL import Image
+from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import train_test_split
+import pandas as pd
+import os
+import cv2
+import numpy as np
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)  # Configure logging to show INFO level messages
-logger = logging.getLogger(__name__)  # Create a logger object
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class SkinLesionDataset(Dataset):
     def __init__(self, image_paths, labels, transform=None):
-        self.image_paths = image_paths  # Store image paths
-        self.labels = labels  # Store labels
-        self.transform = transform  # Store transform function
+        self.image_paths = image_paths
+        self.labels = labels
+        self.transform = transform
+        self.label_to_index = {'nv': 0, 'mel': 1, 'bkl': 2, 'bcc': 3, 'akiec': 4, 'vasc': 5, 'df': 6}
 
     def __len__(self):
-        return len(self.image_paths)  # Return the number of images
+        return len(self.image_paths)
 
     def __getitem__(self, idx):
-        image = Image.open(self.image_paths[idx]).convert('RGB')  # Open image and convert to RGB
-        label = self.labels[idx]  # Get the label for the image
+        image = Image.open(self.image_paths[idx]).convert('RGB')
+        label = self.labels[idx]
 
         if self.transform:
-            image = self.transform(image)  # Apply transform if provided
+            image = self.transform(image)
 
-        return image, label  # Return the image and its label
+        # Convert string label to numeric index
+        label_index = self.label_to_index[label]
+        
+        return image, torch.tensor(label_index, dtype=torch.long)
+
+class CustomCNN(nn.Module):
+    def __init__(self, num_classes):
+        super(CustomCNN, self).__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        self.classifier = nn.Sequential(
+            nn.Linear(128 * 28 * 28, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(),
+            nn.Linear(512, num_classes)
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = torch.flatten(x, 1)
+        x = self.classifier(x)
+        return x
 
 class SkinCancerModel:
     def __init__(self):
         self.label_dict = {
-            0: "Benign Keratosis-like Lesions",
-            1: "Melanocytic Nevi",
-            2: "Melanoma",
-            3: "Dermatofibroma",
-            4: "Vascular Lesions",
-            5: "Basal Cell Carcinoma",
-            6: "Actinic Keratoses",
-            7: "Melanocytic Nevus"
-        }  # Dictionary mapping label indices to label names
+            'akiec': "Actinic Keratoses and Bowen's disease",
+            'bcc': "Basal Cell Carcinoma",
+            'bkl': "Benign Keratosis-like Lesions",
+            'df': "Dermatofibroma",
+            'mel': "Melanoma",
+            'nv': "Melanocytic Nevi",
+            'vasc': "Vascular Lesions"
+        }
+        self.label_to_index = {'nv': 0, 'mel': 1, 'bkl': 2, 'bcc': 3, 'akiec': 4, 'vasc': 5, 'df': 6}
+        self.model = CustomCNN(num_classes=len(self.label_dict))
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
         
-        self.model = timm.create_model('tf_efficientnet_b0_ns', pretrained=True, num_classes=len(self.label_dict))  # Create a pre-trained model with the specified number of classes
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # Use GPU if available, otherwise use CPU
-        self.model.to(self.device)  # Move the model to the appropriate device
-
+        # Add DataParallel if multiple GPUs are available
+        if torch.cuda.device_count() > 1:
+            self.model = nn.DataParallel(self.model)
+        
         if os.path.exists('skin_cancer_model.pth'):
-            self.model.load_state_dict(torch.load('skin_cancer_model.pth'))  # Load model weights if the file exists
-            logger.info("Loaded pre-trained model weights.")  # Log that the model weights were loaded
+            self.model.load_state_dict(torch.load('skin_cancer_model.pth'))
+            logger.info("Loaded pre-trained model weights.")
 
     @staticmethod
     def prepare_data(metadata_path, images_dir):
-        metadata = pd.read_csv(metadata_path)  # Read metadata from CSV file
-        image_paths = [os.path.join(images_dir, f"{image_id}.jpg") for image_id in metadata['image_id']]  # Create list of image paths
-        labels = metadata['dx'].map({
-            "bkl": 0,
-            "nv": 1,
-            "mel": 2,
-            "df": 3,
-            "vasc": 4,
-            "bcc": 5,
-            "akiec": 6,
-            "mns": 7
-        }).values  # Map diagnosis labels to numerical values
+        metadata = pd.read_csv(metadata_path)
+        image_paths = [os.path.join(images_dir, f"{image_id}.jpg") for image_id in metadata['image_id']]
+        labels = metadata['dx'].values
 
-        # Log the distribution of labels
+        # No need to convert labels to numeric indices
         label_counts = pd.Series(labels).value_counts()
         logger.info(f"Label distribution: {label_counts.to_dict()}")
 
-        return train_test_split(image_paths, labels, test_size=0.2, random_state=42)  # Split data into training and validation sets
+        return train_test_split(image_paths, labels, test_size=0.2, random_state=42)
 
     @staticmethod
-    def get_train_transform():
+    def get_transform():
         return transforms.Compose([
-            transforms.RandomResizedCrop(224),  # Randomly crop and resize images to 224x224
-            transforms.RandomHorizontalFlip(),  # Randomly flip images horizontally
-            transforms.RandomVerticalFlip(),  # Randomly flip images vertically
-            transforms.RandomRotation(20),  # Randomly rotate images by up to 20 degrees
-            transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1),  # Randomly change brightness, contrast, saturation, and hue
-            transforms.ToTensor(),  # Convert images to PyTorch tensors
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),  # Normalize images with mean and std
-        ])  # Return a composed transform for training
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
 
-    @staticmethod
-    def get_val_transform():
-        return transforms.Compose([
-            transforms.Resize((224, 224)),  # Resize images to 224x224
-            transforms.ToTensor(),  # Convert images to PyTorch tensors
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),  # Normalize images with mean and std
-        ])  # Return a composed transform for validation
+    def detect_skin(self, image):
+        # Convert the image to numpy array and then to BGR color space
+        image_np = (image.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+        image_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+        
+        # Convert to YCrCb color space
+        image_ycrcb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2YCrCb)
+
+        # Adjust skin color range for medical images
+        lower_skin = np.array([0, 125, 75], dtype=np.uint8)  # Relaxed lower bounds
+        upper_skin = np.array([255, 188, 145], dtype=np.uint8)  # Increased upper bounds
+
+        # Create binary mask
+        skin_mask = cv2.inRange(image_ycrcb, lower_skin, upper_skin)
+
+        # Enhance mask with additional color space check
+        image_hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+        lower_skin_hsv = np.array([0, 20, 70], dtype=np.uint8)
+        upper_skin_hsv = np.array([20, 255, 255], dtype=np.uint8)
+        skin_mask_hsv = cv2.inRange(image_hsv, lower_skin_hsv, upper_skin_hsv)
+        
+        # Combine masks
+        skin_mask = cv2.bitwise_or(skin_mask, skin_mask_hsv)
+
+        # Apply morphological operations to clean up the mask
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))  # Reduced kernel size
+        skin_mask = cv2.erode(skin_mask, kernel, iterations=1)
+        skin_mask = cv2.dilate(skin_mask, kernel, iterations=1)
+
+        # Fill holes in the mask
+        skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_CLOSE, kernel)
+
+        return skin_mask
+
+    def predict(self, image_path):
+        self.model.eval()
+        image = Image.open(image_path).convert('RGB')
+        transform = self.get_transform()
+        image_tensor = transform(image).to(self.device)
+
+        # Detect skin
+        skin_mask = self.detect_skin(image_tensor)
+        
+        # Adjust threshold for skin detection (lower threshold for medical images)
+        if np.sum(skin_mask) / (skin_mask.shape[0] * skin_mask.shape[1]) < 0.01:  # Changed from 0.05 to 0.01
+            return "Please upload an image containing human skin.", 0
+
+        # Apply the skin mask to the image
+        masked_image = image_tensor * torch.from_numpy(skin_mask).float().unsqueeze(0).to(self.device)
+
+        with torch.no_grad():
+            output = self.model(masked_image.unsqueeze(0))
+            probabilities = torch.nn.functional.softmax(output, dim=1)
+            confidence, predicted = torch.max(probabilities, 1)
+
+        # Convert predicted index to label
+        index_to_label = {v: k for k, v in self.label_to_index.items()}
+        predicted_label = index_to_label.get(predicted.item(), "Unknown")
+        predicted_label = self.label_dict.get(predicted_label, "Unknown")
+        
+        # Convert confidence to percentage with 2 decimal places and add '%' symbol
+        confidence_percent = f"{(confidence.item() * 100):.2f}%"
+
+        return predicted_label, confidence_percent
 
     @classmethod
     def train_with_ham10000(cls, metadata_path, images_dir):
-        model = cls()  # Create an instance of SkinCancerModel
-        train_images, val_images, train_labels, val_labels = cls.prepare_data(metadata_path, images_dir)  # Prepare data
-        model.train(
-            train_data={'image_paths': train_images, 'labels': train_labels},  # Training data
-            val_data={'image_paths': val_images, 'labels': val_labels},  # Validation data
-            epochs=10,  # Number of epochs
-            batch_size=32,  # Batch size
-            learning_rate=0.001  # Learning rate
-        )  # Train the model
+        model = cls()
+        train_images, val_images, train_labels, val_labels = cls.prepare_data(metadata_path, images_dir)
+        
+        # Create datasets
+        train_dataset = SkinLesionDataset(train_images, train_labels, transform=cls.get_transform())
+        val_dataset = SkinLesionDataset(val_images, val_labels, transform=cls.get_transform())
+        
+        # Create data loaders with num_workers
+        num_workers = 4  # Adjust based on your CPU cores
+        train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=num_workers, pin_memory=True)
+        val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=num_workers, pin_memory=True)
+        
+        # Training logic
+        num_epochs = 10
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam(model.model.parameters(), lr=0.001)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=2)
 
-    def train(self, train_data, val_data, epochs=10, batch_size=32, learning_rate=0.001):
-        train_dataset = SkinLesionDataset(train_data['image_paths'], train_data['labels'], transform=self.get_train_transform())  # Create training dataset
-        val_dataset = SkinLesionDataset(val_data['image_paths'], val_data['labels'], transform=self.get_val_transform())  # Create validation dataset
-
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)  # Create DataLoader for training data
-        val_loader = DataLoader(val_dataset, batch_size=batch_size)  # Create DataLoader for validation data
-
-        criterion = torch.nn.CrossEntropyLoss()  # Define loss function
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)  # Define optimizer
-
-        for epoch in range(epochs):
-            self.model.train()  # Set model to training mode
-            for images, labels in train_loader:
-                images, labels = images.to(self.device), labels.to(self.device)  # Move images and labels to device
+        for epoch in range(num_epochs):
+            model.model.train()
+            for batch in train_loader:
+                inputs, labels = batch
+                inputs, labels = inputs.to(model.device), labels.to(model.device)
                 
-                optimizer.zero_grad()  # Zero the gradients
-                outputs = self.model(images)  # Forward pass
-                loss = criterion(outputs, labels)  # Compute loss
-                loss.backward()  # Backward pass
-                optimizer.step()  # Update weights
+                # Apply skin detection (consider moving this to the dataset class for preprocessing)
+                skin_masks = torch.stack([torch.from_numpy(model.detect_skin(img)) for img in inputs])
+                masked_inputs = inputs * skin_masks.float().unsqueeze(1).to(model.device)
+                
+                optimizer.zero_grad()
+                outputs = model.model(masked_inputs)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
 
-            # Validation
-            self.model.eval()  # Set model to evaluation mode
+            model.model.eval()
             val_loss = 0
             correct = 0
             total = 0
             with torch.no_grad():
-                for images, labels in val_loader:
-                    images, labels = images.to(self.device), labels.to(self.device)  # Move images and labels to device
-                    outputs = self.model(images)  # Forward pass
-                    val_loss += criterion(outputs, labels).item()  # Compute validation loss
-                    _, predicted = outputs.max(1)  # Get predicted labels
-                    total += labels.size(0)  # Total number of labels
-                    correct += predicted.eq(labels).sum().item()  # Number of correct predictions
+                for inputs, labels in val_loader:
+                    inputs, labels = inputs.to(model.device), labels.to(model.device)
+                    outputs = model.model(inputs)
+                    val_loss += criterion(outputs, labels).item()
+                    _, predicted = outputs.max(1)
+                    total += labels.size(0)
+                    correct += predicted.eq(labels).sum().item()
 
-            logger.info(f'Epoch {epoch+1}/{epochs}, Train Loss: {loss.item():.4f}, Val Loss: {val_loss/len(val_loader):.4f}, Val Acc: {100.*correct/total:.2f}%')  # Log training and validation results
+            avg_val_loss = val_loss / len(val_loader)
+            scheduler.step(avg_val_loss)
+            
+            logger.info(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {loss.item():.4f}, Val Loss: {avg_val_loss:.4f}, Val Acc: {100.*correct/total:.2f}%')
 
-        torch.save(self.model.state_dict(), 'skin_cancer_model.pth')  # Save model weights
+        torch.save(model.model.state_dict(), 'skin_cancer_model.pth')
+        logger.info("Model trained and saved.")
 
-    def predict(self, image_path):
-        self.model.eval()  # Set model to evaluation mode
-        image = Image.open(image_path).convert('RGB')  # Open image and convert to RGB
-        image_tensor = self.get_val_transform()(image).unsqueeze(0).to(self.device)  # Apply validation transform and add batch dimension
-        
-        with torch.no_grad():
-            output = self.model(image_tensor)  # Forward pass
-            probabilities = torch.nn.functional.softmax(output[0], dim=0)  # Compute probabilities
-            predicted_index = torch.argmax(output, dim=1).item()  # Get predicted label index
-
-        confidence = probabilities[predicted_index].item()  # Get confidence of the prediction
-        predicted_label = self.label_dict[predicted_index]  # Get predicted label
-
-        return predicted_label, confidence  # Return predicted label and confidence
-
-    def add_new_data(self, image_path, label):
-        """
-        Add new data to the training set and retrain the model.
-        """
-        # Append new data to the existing dataset
-        new_image_path = os.path.join('./metadata.csv', os.path.basename(image_path))  # Create new image path
-        os.makedirs('./metadata.csv', exist_ok=True)  # Create directory if it doesn't exist
-        Image.open(image_path).save(new_image_path)  # Save image to new path
-
-        with open('./metadata.csv', 'a') as f:
-            f.write(f"{os.path.basename(image_path).split('.')[0]},{label}\n")  # Append new data to metadata file
-
-        # Retrain the model with the new data
-        train_images, val_images, train_labels, val_labels = self.prepare_data('./metadata.csv', './HAM10000_images_part_1')  # Prepare new data
-        self.train(
-            train_data={'image_paths': train_images, 'labels': train_labels},  # Training data
-            val_data={'image_paths': val_images, 'labels': val_labels},  # Validation data
-            epochs=10,  # Number of epochs
-            batch_size=32,  # Batch size
-            learning_rate=0.001  # Learning rate
-        )  # Retrain the model
-
-    def retrain_with_new_data(self, csv_file):
-        # Create a reverse mapping of the label dictionary
-        reverse_label_dict = {v: k for k, v in self.label_dict.items()}
-
-        # Read new data from CSV
-        new_image_paths = []
-        new_labels = []
-        with open(csv_file, 'r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                new_image_paths.append(row['Image'])
-                # Use the reverse mapping to get the label index
-                prediction = row['Prediction']
-                if prediction in reverse_label_dict:
-                    new_labels.append(reverse_label_dict[prediction])
-                else:
-                    logger.warning(f"Unknown prediction: {prediction}. Skipping this entry.")
-                    continue
-
-        # Combine new data with existing data
-        train_images, val_images, train_labels, val_labels = self.prepare_data('./metadata.csv', './HAM10000_images_part_1')
-        train_images += new_image_paths
-        train_labels += new_labels
-
-        # Retrain the model
-        self.train(
-            train_data={'image_paths': train_images, 'labels': train_labels},
-            val_data={'image_paths': val_images, 'labels': val_labels},
-            epochs=5,  # Reduced number of epochs for faster retraining
-            batch_size=32,
-            learning_rate=0.0001  # Reduced learning rate for fine-tuning
-        )
-
-        logger.info("Model retrained with new data.")
+    def label_to_index(self, label):
+        return list(self.label_dict.keys()).index(label)
