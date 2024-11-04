@@ -16,20 +16,24 @@ logger = logging.getLogger(__name__)
 
 class SkinLesionDataset(Dataset):
     def __init__(self, image_paths, labels, transform=None):
-        self.image_paths = image_paths
-        self.labels = labels
-        self.transform = transform
+        # Initialize dataset with image paths, labels and optional transforms
+        self.image_paths = image_paths  # List of paths to images
+        self.labels = labels  # Corresponding labels for images
+        self.transform = transform  # Image transformations to apply
+        # Dictionary mapping label strings to numeric indices
         self.label_to_index = {'nv': 0, 'mel': 1, 'bkl': 2, 'bcc': 3, 'akiec': 4, 'vasc': 5, 'df': 6}
 
     def __len__(self):
+        # Return the total number of images in the dataset
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        image = Image.open(self.image_paths[idx]).convert('RGB')
-        label = self.labels[idx]
+        # Load and process a single image-label pair
+        image = Image.open(self.image_paths[idx]).convert('RGB')  # Load image and convert to RGB
+        label = self.labels[idx]  # Get corresponding label
 
         if self.transform:
-            image = self.transform(image)
+            image = self.transform(image)  # Apply transformations if specified
 
         # Convert string label to numeric index
         label_index = self.label_to_index[label]
@@ -42,19 +46,32 @@ class CustomCNN(nn.Module):
         self.features = nn.Sequential(
             nn.Conv2d(3, 32, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
+            nn.BatchNorm2d(32),
+            nn.Dropout2d(0.25),
             nn.MaxPool2d(kernel_size=2, stride=2),
+            
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
+            nn.BatchNorm2d(64),
+            nn.Dropout2d(0.25),
             nn.MaxPool2d(kernel_size=2, stride=2),
+            
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
+            nn.BatchNorm2d(128),
+            nn.Dropout2d(0.25),
             nn.MaxPool2d(kernel_size=2, stride=2)
         )
         self.classifier = nn.Sequential(
             nn.Linear(128 * 28 * 28, 512),
             nn.ReLU(inplace=True),
-            nn.Dropout(),
-            nn.Linear(512, num_classes)
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.5),
+            nn.Linear(512, 256),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(256),
+            nn.Dropout(0.5),
+            nn.Linear(256, num_classes)
         )
 
     def forward(self, x):
@@ -84,20 +101,52 @@ class SkinCancerModel:
             self.model = nn.DataParallel(self.model)
         
         if os.path.exists('skin_cancer_model.pth'):
-            self.model.load_state_dict(torch.load('skin_cancer_model.pth'))
-            logger.info("Loaded pre-trained model weights.")
+            try:
+                # Load state dict with map_location for proper device handling
+                state_dict = torch.load('skin_cancer_model.pth', map_location=self.device)
+                
+                # Handle both DataParallel and non-DataParallel state dicts
+                if isinstance(self.model, nn.DataParallel):
+                    self.model.load_state_dict(state_dict)
+                else:
+                    # Remove 'module.' prefix if present in state dict keys
+                    if list(state_dict.keys())[0].startswith('module.'):
+                        state_dict = {k[7:]: v for k, v in state_dict.items()}
+                    self.model.load_state_dict(state_dict)
+                    
+                logger.info("Loaded pre-trained model weights.")
+            except Exception as e:
+                logger.warning(f"Failed to load model weights: {str(e)}")
+                logger.info("Initializing with new model weights.")
 
     @staticmethod
     def prepare_data(metadata_path, images_dir):
+        # Read metadata and ensure proper image matching
         metadata = pd.read_csv(metadata_path)
-        image_paths = [os.path.join(images_dir, f"{image_id}.jpg") for image_id in metadata['image_id']]
-        labels = metadata['dx'].values
-
-        # No need to convert labels to numeric indices
+        
+        # Create full image paths using image_id
+        image_paths = []
+        labels = []
+        
+        # Verify each image exists before adding to dataset
+        for _, row in metadata.iterrows():
+            image_path = os.path.join(images_dir, f"{row['image_id']}.jpg")
+            if os.path.exists(image_path):
+                image_paths.append(image_path)
+                labels.append(row['dx'])
+            else:
+                logger.warning(f"Image not found: {image_path}")
+        
+        # Verify data integrity
+        if len(image_paths) == 0:
+            raise ValueError(f"No valid images found in {images_dir}")
+        
+        # Log dataset statistics
         label_counts = pd.Series(labels).value_counts()
+        logger.info(f"Total images found: {len(image_paths)}")
         logger.info(f"Label distribution: {label_counts.to_dict()}")
-
-        return train_test_split(image_paths, labels, test_size=0.2, random_state=42)
+        
+        return train_test_split(image_paths, labels, test_size=0.2, random_state=42, stratify=labels)
 
     @staticmethod
     def get_transform():
@@ -181,35 +230,40 @@ class SkinCancerModel:
         train_dataset = SkinLesionDataset(train_images, train_labels, transform=cls.get_transform())
         val_dataset = SkinLesionDataset(val_images, val_labels, transform=cls.get_transform())
         
-        # Create data loaders with num_workers
-        num_workers = 4  # Adjust based on your CPU cores
-        train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=num_workers, pin_memory=True)
-        val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=num_workers, pin_memory=True)
+        # Create data loaders
+        train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
+        val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
         
-        # Training logic
-        num_epochs = 10
+        # Define loss function and optimizer
         criterion = nn.CrossEntropyLoss()
-        optimizer = torch.optim.Adam(model.model.parameters(), lr=0.001)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=2)
+        optimizer = torch.optim.Adam(model.model.parameters(), lr=0.0001)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.1)
+
+        num_epochs = 20
+        best_val_acc = 0
 
         for epoch in range(num_epochs):
             model.model.train()
-            for batch in train_loader:
-                inputs, labels = batch
+            running_loss = 0.0
+            for inputs, labels in train_loader:
                 inputs, labels = inputs.to(model.device), labels.to(model.device)
                 
-                # Apply skin detection (consider moving this to the dataset class for preprocessing)
-                skin_masks = torch.stack([torch.from_numpy(model.detect_skin(img)) for img in inputs])
-                masked_inputs = inputs * skin_masks.float().unsqueeze(1).to(model.device)
-                
+                # Zero the parameter gradients
                 optimizer.zero_grad()
-                outputs = model.model(masked_inputs)
+                
+                # Forward pass
+                outputs = model.model(inputs)
                 loss = criterion(outputs, labels)
+                
+                # Backward pass and optimize
                 loss.backward()
                 optimizer.step()
+                
+                running_loss += loss.item()
 
+            # Validation phase
             model.model.eval()
-            val_loss = 0
+            val_loss = 0.0
             correct = 0
             total = 0
             with torch.no_grad():
@@ -221,13 +275,18 @@ class SkinCancerModel:
                     total += labels.size(0)
                     correct += predicted.eq(labels).sum().item()
 
+            avg_train_loss = running_loss / len(train_loader)
             avg_val_loss = val_loss / len(val_loader)
+            val_acc = 100. * correct / total
             scheduler.step(avg_val_loss)
-            
-            logger.info(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {loss.item():.4f}, Val Loss: {avg_val_loss:.4f}, Val Acc: {100.*correct/total:.2f}%')
 
-        torch.save(model.model.state_dict(), 'skin_cancer_model.pth')
-        logger.info("Model trained and saved.")
+            logger.info(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, Val Acc: {val_acc:.2f}%')
 
-    def label_to_index(self, label):
+            # Save the model if it has the best validation accuracy so far
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                torch.save(model.model.state_dict(), 'skin_cancer_model.pth')
+                logger.info("Model saved with improved validation accuracy.")
+
+    def get_label_index(self, label):
         return list(self.label_dict.keys()).index(label)
