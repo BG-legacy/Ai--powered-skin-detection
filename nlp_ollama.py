@@ -1,53 +1,66 @@
-# Import necessary modules for LangChain
-from langchain_community.chat_models import ChatOllama  # Import ChatOllama model from langchain_community
-from langchain_core.output_parsers import StrOutputParser  # Import string output parser from langchain_core
-from langchain_core.prompts import ChatPromptTemplate  # Import chat prompt template from langchain_core
-import requests
-
-class LangChainOllama:
+class SimpleDiagnosisExplainer:
     def __init__(self):
-        try:
-            # Initialize the ChatOllama model
-            self.llm = ChatOllama(model='llama3.1')  # Create an instance of ChatOllama with the specified model version
-        except requests.exceptions.ConnectionError:
-            print("Warning: Unable to connect to Ollama server. Responses will be unavailable.")
-            self.llm = None
+        # Dictionary containing explanations for different skin conditions
+        self.explanations = {
+            "Actinic Keratoses and Bowen's disease": """
+                A pre-cancerous skin growth typically caused by sun damage.
+                Key characteristics:
+                - Rough, scaly patches on sun-exposed areas
+                - May be red, tan, pink, or flesh-colored
+                Advice: Protect skin from sun exposure and seek regular dermatological check-ups.
+            """,
+            "Basal Cell Carcinoma": """
+                The most common type of skin cancer.
+                Key characteristics:
+                - Pearly, waxy bumps
+                - Flat, flesh-colored or brown scar-like lesions
+                Advice: Early treatment has high success rates. Regular skin checks recommended.
+            """,
+            "Benign Keratosis-like Lesions": """
+                Non-cancerous skin growths that commonly appear with age.
+                Key characteristics:
+                - Brown, black or light tan
+                - Waxy, scaly, slightly raised
+                Advice: Generally harmless but monitor for changes.
+            """,
+            "Dermatofibroma": """
+                A common benign skin tumor.
+                Key characteristics:
+                - Small, firm bump
+                - Usually brown to reddish
+                Advice: Usually harmless and doesn't require treatment unless symptomatic.
+            """,
+            "Melanoma": """
+                A serious form of skin cancer that develops from melanocytes.
+                Key characteristics:
+                - Asymmetrical shape
+                - Irregular borders
+                - Variable colors
+                Advice: Requires immediate medical attention. Early detection is crucial.
+            """,
+            "Melanocytic Nevi": """
+                Common moles, usually benign.
+                Key characteristics:
+                - Round or oval shape
+                - Even coloring
+                - Clear borders
+                Advice: Monitor for changes using the ABCDE rule.
+            """,
+            "Vascular Lesions": """
+                Abnormalities of blood vessels in the skin.
+                Key characteristics:
+                - Red, purple, or pink in color
+                - May be flat or raised
+                Advice: Most are harmless but consult doctor if concerned.
+            """
+        }
 
-    def generate_response(self, question, prediction=None, confidence=None):
-        if self.llm is None:
-            return "Error: Ollama server is not available. Please ensure it's running and try again."
-
-        # Format confidence as a percentage if provided
-        confidence_percentage = f"{confidence * 100:.2f}%" if confidence is not None else "N/A"
-
-        # Create a ChatPromptTemplate to handle skin cancer queries
-        prompt = ChatPromptTemplate.from_template(f"""
-        You are a dermatology expert. Provide a detailed and informative response to the following question about skin cancer:
+    def generate_response(self, question, prediction=None):
+        if prediction is None:
+            return "Error: No diagnosis provided."
         
-        Question: {question}
+        explanation = self.explanations.get(prediction)
+        if explanation is None:
+            return "Error: Unknown diagnosis type."
         
-        Model Prediction: {prediction}
-        Confidence: {confidence_percentage}
-        
-        General Description: {prediction} is a type of cancer that develops from the pigment-containing cells known as melanocytes. It is less common than other skin cancers but more dangerous if not detected early.
-        
-        Include:
-        1. General description of {prediction}
-        2. Detailed description
-        3. Key characteristics
-        4. Potential risks
-        5. Advice for patients
-        6. When to seek medical attention
-        
-        Be thorough and specific in your response.
-        """)  # Define a detailed prompt template for generating a response about skin cancer
-
-        # Create a processing chain (connect the prompt to the LLM and output parser)
-        chain = prompt | self.llm | StrOutputParser()  # Chain the prompt, LLM, and output parser together
-
-        try:
-            # Generate the response
-            response = chain.invoke({'question': question, 'prediction': prediction, 'confidence_percentage': confidence_percentage})
-            return response  # Return the generated response
-        except requests.exceptions.ConnectionError:
-            return "Error: Lost connection to Ollama server. Please try again later."
+        return explanation.strip()
