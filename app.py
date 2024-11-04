@@ -1,6 +1,6 @@
 from flask import Flask, request, render_template  # Import Flask and necessary modules for handling requests and rendering templates
 from Model import SkinCancerModel  # Import the SkinCancerModel class from Model.py
-from nlp_ollama import LangChainOllama  # Import the LangChainOllama class from nlp_ollama.py
+from nlp_ollama import SimpleDiagnosisExplainer  # Import the SimpleDiagnosisExplainer class from nlp_ollama.py
 import os  # Import os for file and directory operations
 import requests  # Add this import
 
@@ -9,7 +9,7 @@ app = Flask(__name__)  # Create a Flask application instance
 
 # Initialize model and NLP components
 skin_cancer_model = SkinCancerModel()  # Create an instance of SkinCancerModel
-nlp_model = LangChainOllama()  # Create an instance of LangChainOllama
+diagnosis_explainer = SimpleDiagnosisExplainer()  # Create an instance of SimpleDiagnosisExplainer
 
 # Route for the home page with two options: Ask a question or upload an image
 @app.route('/')
@@ -21,7 +21,7 @@ def home():
 def ask_question():
     question = request.form.get('question')  # Get the question from the form data
     if question:
-        response = nlp_model.generate_response(question)  # Generate a response using the NLP model
+        response = diagnosis_explainer.generate_response(question)  # Generate a response using the NLP model
         if response.startswith("Error:"):
             return render_template('error.html', error=response), 503  # Render the error page with the error message
         return render_template('response.html', response=response)  # Render the response page with the generated response
@@ -46,7 +46,7 @@ def upload_and_predict():
         if predicted_label == "Please upload an image containing human skin.":
             return render_template('error.html', error=predicted_label), 400
 
-        description = nlp_model.generate_response("What does this mean?", predicted_label)
+        description = diagnosis_explainer.generate_response("What does this mean?", predicted_label)
 
         if description.startswith("Error:"):
             return render_template('error.html', error=description), 503
