@@ -9,6 +9,9 @@ import pandas as pd
 import os
 import cv2
 import numpy as np
+from torch.optim import Adam
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.nn import CrossEntropyLoss
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -75,9 +78,17 @@ class CustomCNN(nn.Module):
         )
 
     def forward(self, x):
-        x = self.features(x)
+        # Convolutional layers
+        x = self.features[0:5](x)   # First conv block
+        x = self.features[5:10](x)  # Second conv block
+        x = self.features[10:](x)   # Third conv block
+        
+        # Flatten for fully connected layers
         x = torch.flatten(x, 1)
+        
+        # Fully connected layers
         x = self.classifier(x)
+        
         return x
 
 class SkinCancerModel:
@@ -118,7 +129,6 @@ class SkinCancerModel:
             except Exception as e:
                 logger.warning(f"Failed to load model weights: {str(e)}")
                 logger.info("Initializing with new model weights.")
-
     @staticmethod
     def prepare_data(metadata_path, images_dir):
         # Read metadata and ensure proper image matching
@@ -151,6 +161,10 @@ class SkinCancerModel:
     @staticmethod
     def get_transform():
         return transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomVerticalFlip(),  # Add vertical flip
+            transforms.RandomRotation(20),    # Increase random rotation
+            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.2),  # Increase color jitter
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
@@ -234,13 +248,15 @@ class SkinCancerModel:
         train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
         val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
         
-        # Define loss function and optimizer
-        criterion = nn.CrossEntropyLoss()
-        optimizer = torch.optim.Adam(model.model.parameters(), lr=0.0001)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.1)
+        # Define loss function and optimizer with L2 regularization
+        criterion = CrossEntropyLoss()
+        optimizer = Adam(model.model.parameters(), lr=0.0001, weight_decay=1e-4)  # Reduce learning rate
+        scheduler = ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.1)
 
-        num_epochs = 20
+        num_epochs = 30  # Increase number of epochs
         best_val_acc = 0
+        early_stopping_patience = 5
+        no_improvement_epochs = 0
 
         for epoch in range(num_epochs):
             model.model.train()
@@ -287,6 +303,33 @@ class SkinCancerModel:
                 best_val_acc = val_acc
                 torch.save(model.model.state_dict(), 'skin_cancer_model.pth')
                 logger.info("Model saved with improved validation accuracy.")
+                no_improvement_epochs = 0
+            else:
+                no_improvement_epochs += 1
+
+            # Early stopping
+            if no_improvement_epochs >= early_stopping_patience:
+                logger.info("Early stopping triggered.")
+                break
 
     def get_label_index(self, label):
         return list(self.label_dict.keys()).index(label)
+
+    def load_model_weights(self, path):
+        try:
+            # Load the model weights with map_location for proper device handling
+            state_dict = torch.load(path, map_location=self.device)
+            
+            # Handle both DataParallel and non-DataParallel state dicts
+            if isinstance(self.model, nn.DataParallel):
+                self.model.load_state_dict(state_dict, strict=False)
+            else:
+                # Remove 'module.' prefix if present in state dict keys
+                if list(state_dict.keys())[0].startswith('module.'):
+                    state_dict = {k[7:]: v for k, v in state_dict.items()}
+                self.model.load_state_dict(state_dict, strict=False)
+                
+            logger.info("Model weights loaded successfully.")
+        except Exception as e:
+            logger.warning(f"Failed to load model weights: {str(e)}")
+            logger.info("Initializing with new model weights.")
